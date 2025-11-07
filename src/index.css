@@ -1,0 +1,14 @@
+@tailwind base;
+@tailwind components;
+@tailwind utilities;
+
+html, body, #root {
+  height: 100%;
+}
+
+.gradient-bg {
+  background: radial-gradient(1200px 600px at 10% 10%, rgba(99, 102, 241, 0.25), transparent 60%),
+              radial-gradient(1200px 600px at 90% 10%, rgba(147, 51, 234, 0.25), transparent 60%),
+              linear-gradient(180deg, #0b1022 0%, #0a0f1d 100%);
+}
+
