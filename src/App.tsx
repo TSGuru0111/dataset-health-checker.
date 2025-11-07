@@ -1,10 +1,11 @@
-import React, { useMemo, useRef, useState } from 'react'
-import { Upload, Mail, FileDown, Database } from 'lucide-react'
+import React, { useEffect, useMemo, useRef, useState } from 'react'
+import { Upload, Mail, FileDown, Database, Sparkles, Filter, Rocket, Clipboard, CheckCircle2 } from 'lucide-react'
 import Papa from 'papaparse'
 import * as XLSX from 'xlsx'
-import { Row, missingPercentages, getColumnTypes, findDuplicates, iqrOutliers, statsForNumeric, categoricalSummary, correlationMatrix, scoreOverall, healthBadge } from './utils/analysis'
+import { Row, missingPercentages, getColumnTypes, findDuplicates, iqrOutliers, statsForNumeric, categoricalSummary, correlationMatrix, scoreOverall, healthBadge, quantile } from './utils/analysis'
 import { generateSample } from './utils/sampleData'
 import { BarChart, Bar, XAxis, YAxis, Tooltip, ResponsiveContainer, CartesianGrid } from 'recharts'
+import { FeatureSuggestion, ComplexityLevel, generateFeatureSuggestions } from './utils/featureEngineering'
 
 type DataSet = { name: string, rows: Row[] }
 
@@ -15,6 +16,17 @@ export default function App() {
   const [error, setError] = useState<string | null>(null)
   const [loading, setLoading] = useState(false)
   const inputRef = useRef<HTMLInputElement>(null)
+  const featureSectionRef = useRef<HTMLDivElement>(null)
+  const [featureLoading, setFeatureLoading] = useState(false)
+  const [featureSuggestions, setFeatureSuggestions] = useState<FeatureSuggestion[]>([])
+  const [featureSummary, setFeatureSummary] = useState({ total: 0, high: 0, medium: 0, low: 0 })
+  const [featureHighlight, setFeatureHighlight] = useState<FeatureSuggestion[]>([])
+  const [featureTab, setFeatureTab] = useState<'all' | 'high' | 'quick' | 'advanced'>('all')
+  const [selectedSuggestionIds, setSelectedSuggestionIds] = useState<string[]>([])
+  const [codeLanguage, setCodeLanguage] = useState<'python' | 'r' | 'sql'>('python')
+  const [expandedSuggestionIds, setExpandedSuggestionIds] = useState<string[]>([])
+  const [pipelineScript, setPipelineScript] = useState<string | null>(null)
+  const [previewModal, setPreviewModal] = useState<{ suggestion: FeatureSuggestion; rows: Row[] } | null>(null)
 
   const onFiles = (file: File) => {
     setError(null)
@@ -83,6 +95,171 @@ export default function App() {
 
     return { missing, types, dup, out, stats, cat, corr, avgMissing, typeIssues, typeIssuesScore, highCardCols, cardinalityScore, overall, badge }
   }, [rows])
+
+  useEffect(() => {
+    if (!analysis) {
+      setFeatureSuggestions([])
+      setFeatureSummary({ total: 0, high: 0, medium: 0, low: 0 })
+      setFeatureHighlight([])
+      setFeatureLoading(false)
+      return
+    }
+    setFeatureLoading(true)
+    const timer = window.setTimeout(() => {
+      const payload = generateFeatureSuggestions({
+        rows,
+        numericStats: analysis.stats,
+        categoricalSummary: analysis.cat,
+        corrMatrix: analysis.corr,
+      })
+      setFeatureSuggestions(payload.suggestions)
+      setFeatureSummary(payload.summary)
+      setFeatureHighlight(payload.highlight)
+      setFeatureLoading(false)
+      setSelectedSuggestionIds([])
+      setExpandedSuggestionIds([])
+      setFeatureTab('all')
+    }, 350)
+    return () => window.clearTimeout(timer)
+  }, [analysis, rows])
+
+  const filteredSuggestions = useMemo(() => {
+    if (featureTab === 'all') return featureSuggestions
+    if (featureTab === 'high') return featureSuggestions.filter((s) => s.priority === 'high')
+    if (featureTab === 'quick') return featureSuggestions.filter((s) => s.complexity === 'Easy')
+    if (featureTab === 'advanced') return featureSuggestions.filter((s) => s.complexity === 'Advanced')
+    return featureSuggestions
+  }, [featureTab, featureSuggestions])
+
+  const selectedSuggestions = useMemo(
+    () => featureSuggestions.filter((s) => selectedSuggestionIds.includes(s.id)),
+    [featureSuggestions, selectedSuggestionIds]
+  )
+
+  const toggleSuggestion = (id: string) => {
+    setSelectedSuggestionIds((prev) => prev.includes(id) ? prev.filter((x) => x !== id) : [...prev, id])
+  }
+
+  const toggleExpand = (id: string) => {
+    setExpandedSuggestionIds((prev) => prev.includes(id) ? prev.filter((x) => x !== id) : [...prev, id])
+  }
+
+  const selectAllHigh = () => {
+    const ids = featureSuggestions.filter((s) => s.priority === 'high').map((s) => s.id)
+    setSelectedSuggestionIds(ids)
+  }
+
+  const buildScript = (lang: 'python' | 'r' | 'sql', ideas: FeatureSuggestion[]) => {
+    if (!ideas.length) return ''
+    return ideas.map((idea) => `# ${idea.title}\n${idea.code[lang]}`).join('\n\n')
+  }
+
+  const handleGeneratePipeline = () => {
+    const ideas = selectedSuggestions.length ? selectedSuggestions : featureHighlight
+    const script = buildScript(codeLanguage, ideas)
+    setPipelineScript(script || '# Select feature engineering ideas to generate a script')
+  }
+
+  const downloadFeatureScript = () => {
+    const ideas = selectedSuggestions.length ? selectedSuggestions : featureHighlight
+    const script = buildScript('python', ideas)
+    const content = script || '# No suggestions selected.'
+    const blob = new Blob([content], { type: 'text/x-python' })
+    const link = document.createElement('a')
+    link.href = URL.createObjectURL(blob)
+    link.download = 'feature_engineering.py'
+    link.click()
+  }
+
+  const downloadFeatureChecklist = () => {
+    const ideas = selectedSuggestions.length ? selectedSuggestions : featureSuggestions
+    const lines = ['# Feature Engineering Checklist', '', `Total Ideas: ${ideas.length}`, '']
+    ideas.forEach((idea) => {
+      lines.push(`- ${idea.title} (${idea.priority.toUpperCase()} • ${idea.complexity})`)
+      lines.push(`  - Impact: ${'⭐'.repeat(idea.impact)}${idea.impact < 5 ? '☆'.repeat(5 - idea.impact) : ''}`)
+      lines.push(`  - Why: ${idea.explanation}`)
+      lines.push(`  - Columns: ${idea.columns.join(', ')}`)
+      lines.push('')
+    })
+    const blob = new Blob([lines.join('\n')], { type: 'text/markdown' })
+    const link = document.createElement('a')
+    link.href = URL.createObjectURL(blob)
+    link.download = 'feature_engineering_checklist.md'
+    link.click()
+  }
+
+  const computePreviewRows = (suggestion: FeatureSuggestion): Row[] => {
+    const sample = rows.slice(0, 5).map((r) => ({ ...r }))
+    const [primary] = suggestion.columns
+    if (!sample.length || !primary) return sample
+
+    if (suggestion.title.toLowerCase().includes('polynomial')) {
+      return sample.map((r) => {
+        const value = Number(r[primary]) || 0
+        return { ...r, [`${primary}_squared`]: +(value ** 2).toFixed(2), [`${primary}_cubed`]: +(value ** 3).toFixed(2) }
+      })
+    }
+    if (suggestion.title.toLowerCase().includes('normalize skewed')) {
+      return sample.map((r) => {
+        const value = Number(r[primary]) || 0
+        return { ...r, [`${primary}_log`]: Math.log1p(Math.max(value, 0)).toFixed(3) }
+      })
+    }
+    if (suggestion.title.toLowerCase().includes('discretize')) {
+      const values = sample.map((r) => Number(r[primary]) || 0).sort((a, b) => a - b)
+      const q1 = quantile(values, 0.25)
+      const q3 = quantile(values, 0.75)
+      return sample.map((r) => {
+        const value = Number(r[primary]) || 0
+        const band = value < q1 ? 'Low' : value < q3 ? 'Medium' : 'High'
+        return { ...r, [`${primary}_band`]: band }
+      })
+    }
+    if (suggestion.title.toLowerCase().includes('combine') && suggestion.columns.length >= 2) {
+      const [a, b] = suggestion.columns
+      return sample.map((r) => {
+        const va = Number(r[a]) || 0
+        const vb = Number(r[b]) || 1
+        return { ...r, [`${a}_${b}_ratio`]: +(va / (vb || 1)).toFixed(2) }
+      })
+    }
+    if (suggestion.title.toLowerCase().includes('days between') && suggestion.columns.length >= 2) {
+      const [d1, d2] = suggestion.columns
+      return sample.map((r) => {
+        const start = new Date(r[d1]).getTime()
+        const end = new Date(r[d2]).getTime()
+        const diff = Math.round((end - start) / (1000 * 60 * 60 * 24))
+        return { ...r, [`${d2}_${d1}_days`]: diff }
+      })
+    }
+    if (suggestion.title.toLowerCase().includes('length feature')) {
+      return sample.map((r) => ({ ...r, [`${primary}_length`]: String(r[primary] || '').length }))
+    }
+    return sample
+  }
+
+  const handlePreview = (suggestion: FeatureSuggestion) => {
+    const preview = computePreviewRows(suggestion)
+    setPreviewModal({ suggestion, rows: preview })
+  }
+
+  const scrollToFeatureIdeas = () => {
+    featureSectionRef.current?.scrollIntoView({ behavior: 'smooth' })
+  }
+
+  const priorityMeta: Record<FeatureSuggestion['priority'], { label: string; classes: string; icon: string }> = {
+    high: { label: 'High Impact', classes: 'bg-red-500/20 text-red-200', icon: '🔴' },
+    medium: { label: 'Worth Trying', classes: 'bg-yellow-500/20 text-yellow-200', icon: '🟡' },
+    low: { label: 'Nice to Have', classes: 'bg-green-500/20 text-green-200', icon: '🟢' },
+  }
+
+  const complexityMeta: Record<ComplexityLevel, { label: string; classes: string }> = {
+    Easy: { label: '⚡ Quick Win', classes: 'text-green-300' },
+    Moderate: { label: '⚙️ Standard', classes: 'text-yellow-300' },
+    Advanced: { label: '🔬 Advanced', classes: 'text-red-300' },
+  }
+
+  const renderStars = (impact: number) => '⭐'.repeat(impact) + (impact < 5 ? '☆'.repeat(5 - impact) : '')
 
   const onDrop = (e: React.DragEvent) => {
     e.preventDefault(); e.stopPropagation()
@@ -180,10 +357,25 @@ export default function App() {
                   <span className="ml-auto text-sm text-green-400">Ready for Modeling</span>
                 </div>
               </div>
-              <div className="rounded-xl bg-white/5 p-5 border border-white/10 flex items-center gap-3 justify-between">
-                <button onClick={downloadMarkdown} className="px-4 py-2 rounded-lg bg-emerald-600 hover:bg-emerald-500 flex items-center gap-2"><FileDown size={18}/> Download Report</button>
-                <button onClick={downloadCleaned} className="px-4 py-2 rounded-lg bg-sky-600 hover:bg-sky-500">Download Cleaned</button>
-                <button onClick={emailReport} className="px-4 py-2 rounded-lg bg-purple-600 hover:bg-purple-500 flex items-center gap-2"><Mail size={18}/> Email</button>
+              <div className="rounded-xl bg-white/5 p-5 border border-white/10">
+                <div className="flex items-start gap-3">
+                  <Sparkles className="text-indigo-300"/>
+                  <div className="flex-1">
+                    <h4 className="font-semibold">Feature Engineering Outlook</h4>
+                    <p className="text-sm text-gray-300">{featureSummary.total} ideas queued • {featureSummary.high} high priority • Estimated uplift 15-25%</p>
+                    <div className="mt-3 flex flex-wrap gap-3 text-sm">
+                      {featureHighlight.map((idea) => (
+                        <div key={idea.id} className="bg-indigo-900/40 border border-indigo-500/30 rounded-lg px-3 py-2">
+                          <span className="font-medium">{idea.title}</span>
+                          <span className="block text-xs text-indigo-200">Impact: {'⭐'.repeat(idea.impact)}{idea.impact < 5 ? '☆'.repeat(5 - idea.impact) : ''}</span>
+                        </div>
+                      ))}
+                    </div>
+                  </div>
+                  <button onClick={scrollToFeatureIdeas} className="px-4 py-2 rounded-lg bg-indigo-600 hover:bg-indigo-500 flex items-center gap-2">
+                    <Rocket size={18}/> Explore Ideas
+                  </button>
+                </div>
               </div>
             </div>
 
@@ -340,9 +532,193 @@ export default function App() {
               </ul>
               <p className="text-xs text-gray-300 mt-2">Fixing these issues could improve model accuracy by ~8-12% (estimate)</p>
             </div>
+
+            {/* Feature Engineering Suggestions */}
+            <div ref={featureSectionRef} className="rounded-xl bg-white/5 p-6 border border-white/10 space-y-6">
+              <div className="flex flex-col md:flex-row md:items-center md:justify-between gap-4">
+                <div>
+                  <h3 className="text-xl font-semibold flex items-center gap-2">🎯 Smart Feature Engineering Suggestions</h3>
+                  <p className="text-sm text-gray-300">AI-powered recommendations to boost model performance</p>
+                </div>
+                <div className="flex flex-wrap gap-3 items-center">
+                  <span className="px-3 py-1 rounded-full bg-emerald-500/20 text-emerald-200 text-sm">Potential 15-25% performance improvement</span>
+                  <div className="text-sm text-indigo-200">{featureSummary.total} ideas • {featureSummary.high} High Priority • {featureSummary.medium + featureSummary.low} Medium/Low</div>
+                </div>
+              </div>
+
+              <div className="flex flex-wrap gap-3 items-center text-sm">
+                <div className="flex gap-2">
+                  {([
+                    { key: 'all', label: 'All Suggestions' },
+                    { key: 'high', label: 'High Impact' },
+                    { key: 'quick', label: 'Quick Wins' },
+                    { key: 'advanced', label: 'Advanced' },
+                  ] as const).map((tab) => (
+                    <button
+                      key={tab.key}
+                      onClick={() => setFeatureTab(tab.key)}
+                      className={`px-3 py-1.5 rounded-full border ${featureTab === tab.key ? 'bg-indigo-600 border-indigo-400' : 'border-white/10 bg-white/10 hover:bg-white/20'}`}
+                    >
+                      {tab.label}
+                    </button>
+                  ))}
+                </div>
+                <div className="flex gap-2 ml-auto">
+                  {(['python', 'r', 'sql'] as const).map((lang) => (
+                    <button
+                      key={lang}
+                      onClick={() => setCodeLanguage(lang)}
+                      className={`px-3 py-1.5 rounded border ${codeLanguage === lang ? 'border-sky-400 bg-sky-500/30' : 'border-white/10 bg-white/10 hover:bg-white/20'}`}
+                    >
+                      {lang.toUpperCase()}
+                    </button>
+                  ))}
+                </div>
+              </div>
+
+              <div className="grid grid-cols-1 lg:grid-cols-4 gap-4 text-sm text-indigo-200">
+                <div className="bg-indigo-900/30 rounded-lg p-4 border border-indigo-500/20">
+                  <p className="text-xs uppercase text-gray-300">Ideas</p>
+                  <p className="text-2xl font-semibold">{featureSummary.total}</p>
+                </div>
+                <div className="bg-red-900/30 rounded-lg p-4 border border-red-500/30">
+                  <p className="text-xs uppercase text-gray-300">High Priority</p>
+                  <p className="text-2xl font-semibold">{featureSummary.high}</p>
+                </div>
+                <div className="bg-yellow-900/30 rounded-lg p-4 border border-yellow-500/30">
+                  <p className="text-xs uppercase text-gray-300">Medium Priority</p>
+                  <p className="text-2xl font-semibold">{featureSummary.medium}</p>
+                </div>
+                <div className="bg-green-900/30 rounded-lg p-4 border border-green-500/30">
+                  <p className="text-xs uppercase text-gray-300">Selected</p>
+                  <p className="text-2xl font-semibold">{selectedSuggestionIds.length}</p>
+                </div>
+              </div>
+
+              <div className="flex flex-wrap gap-3 text-sm">
+                <button onClick={selectAllHigh} className="px-4 py-2 rounded-lg bg-red-500/30 hover:bg-red-500/40 border border-red-400/40 flex items-center gap-2"><CheckCircle2 size={16}/> Select All High Priority</button>
+                <button onClick={handleGeneratePipeline} className="px-4 py-2 rounded-lg bg-emerald-500/30 hover:bg-emerald-500/40 border border-emerald-400/40 flex items-center gap-2"><Filter size={16}/> Generate Pipeline ({codeLanguage.toUpperCase()})</button>
+                <button onClick={() => setSelectedSuggestionIds([])} className="px-4 py-2 rounded-lg bg-white/10 hover:bg-white/20 border border-white/20">Clear Selection</button>
+              </div>
+
+              {featureLoading ? (
+                <div className="py-16 text-center text-indigo-200">Crunching ideas...</div>
+              ) : (
+                <div className="space-y-4">
+                  {filteredSuggestions.map((idea) => {
+                    const priority = priorityMeta[idea.priority]
+                    const complexity = complexityMeta[idea.complexity]
+                    const expanded = expandedSuggestionIds.includes(idea.id)
+                    const selected = selectedSuggestionIds.includes(idea.id)
+                    return (
+                      <div key={idea.id} className={`rounded-xl border border-white/10 bg-white/10 p-4 transition ${selected ? 'ring-2 ring-indigo-400' : ''}`}>
+                        <div className="flex flex-col md:flex-row md:items-center md:justify-between gap-3">
+                          <div className="flex items-start gap-3">
+                            <span className={`px-3 py-1 rounded-full text-xs ${priority.classes}`}>{priority.icon} {priority.label}</span>
+                            <div>
+                              <div className="flex items-center gap-2">
+                                <input type="checkbox" checked={selected} onChange={() => toggleSuggestion(idea.id)} className="accent-indigo-500"/>
+                                <h4 className="font-semibold">{idea.title}</h4>
+                              </div>
+                              <p className="text-sm text-gray-200 mt-1">{idea.description}</p>
+                            </div>
+                          </div>
+                          <div className="text-right space-y-1">
+                            <div className={`text-xs ${complexity.classes}`}>{complexity.label}</div>
+                            <div className="text-xs text-yellow-300">Impact: {renderStars(idea.impact)}</div>
+                            <div className="text-xs text-gray-300">Columns: {idea.columns.join(', ')}</div>
+                          </div>
+                        </div>
+                        {expanded && (
+                          <div className="mt-4 space-y-3 text-sm text-gray-200">
+                            <p><span className="text-indigo-200 font-medium">Why this helps:</span> {idea.explanation}</p>
+                            <p><span className="text-indigo-200 font-medium">Example:</span> {idea.example}</p>
+                            <div className="bg-black/30 rounded-lg p-3 overflow-auto">
+                              <pre className="text-xs whitespace-pre-wrap">{idea.code[codeLanguage]}</pre>
+                            </div>
+                          </div>
+                        )}
+                        <div className="flex flex-wrap gap-3 mt-4 text-sm">
+                          <button onClick={() => toggleExpand(idea.id)} className="px-3 py-1.5 rounded bg-white/10 hover:bg-white/20 border border-white/20">{expanded ? 'Hide Details' : 'Show Code'}</button>
+                          <button onClick={() => handlePreview(idea)} className="px-3 py-1.5 rounded bg-indigo-600/40 hover:bg-indigo-600/60 border border-indigo-500/40">Preview Impact</button>
+                          <button onClick={() => toggleSuggestion(idea.id)} className={`px-3 py-1.5 rounded border ${selected ? 'bg-emerald-500/30 border-emerald-400/40' : 'bg-emerald-900/30 border-emerald-600/30 hover:bg-emerald-700/30'}`}>{selected ? 'Applied' : 'Apply'}</button>
+                        </div>
+                      </div>
+                    )
+                  })}
+                  {!filteredSuggestions.length && (
+                    <div className="text-center text-sm text-gray-300 py-12">No suggestions match this filter yet.</div>
+                  )}
+                </div>
+              )}
+            </div>
+
+            {/* Export Options */}
+            <div className="rounded-xl bg-white/5 p-5 border border-white/10 space-y-4">
+              <h3 className="font-semibold">Export Options</h3>
+              <p className="text-sm text-gray-300">Share findings or continue downstream with ready-to-run assets.</p>
+              <div className="flex flex-wrap gap-3">
+                <button onClick={downloadMarkdown} className="px-4 py-2 rounded-lg bg-emerald-600 hover:bg-emerald-500 flex items-center gap-2"><FileDown size={18}/> Download Data Quality Report</button>
+                <button onClick={downloadCleaned} className="px-4 py-2 rounded-lg bg-sky-600 hover:bg-sky-500">Download Cleaned Dataset</button>
+                <button onClick={emailReport} className="px-4 py-2 rounded-lg bg-purple-600 hover:bg-purple-500 flex items-center gap-2"><Mail size={18}/> Email Report</button>
+                <button onClick={downloadFeatureScript} className="px-4 py-2 rounded-lg bg-orange-500 hover:bg-orange-400 flex items-center gap-2"><Clipboard size={18}/> Download Feature Engineering Script</button>
+                <button onClick={downloadFeatureChecklist} className="px-4 py-2 rounded-lg bg-indigo-500 hover:bg-indigo-400 flex items-center gap-2"><Sparkles size={18}/> Export Feature Engineering Checklist</button>
+              </div>
+            </div>
           </section>
         )}
       </main>
+
+      {pipelineScript && (
+        <div className="fixed inset-0 bg-black/60 backdrop-blur-sm flex items-center justify-center p-6 z-50">
+          <div className="bg-slate-900 border border-white/10 rounded-xl max-w-3xl w-full max-h-[80vh] overflow-hidden shadow-xl">
+            <div className="flex items-center justify-between px-4 py-3 border-b border-white/10">
+              <h4 className="font-semibold text-lg">Generated Pipeline ({codeLanguage.toUpperCase()})</h4>
+              <div className="flex gap-2">
+                <button onClick={() => {
+                  navigator.clipboard.writeText(pipelineScript || '')
+                }} className="px-3 py-1.5 rounded bg-indigo-600 hover:bg-indigo-500 text-sm">Copy</button>
+                <button onClick={() => setPipelineScript(null)} className="px-3 py-1.5 rounded bg-white/10 hover:bg-white/20 text-sm">Close</button>
+              </div>
+            </div>
+            <pre className="p-4 text-sm text-indigo-100 overflow-auto whitespace-pre-wrap">{pipelineScript}</pre>
+          </div>
+        </div>
+      )}
+
+      {previewModal && (
+        <div className="fixed inset-0 bg-black/70 backdrop-blur-sm flex items-center justify-center p-6 z-40">
+          <div className="bg-slate-900 border border-white/10 rounded-xl max-w-4xl w-full max-h-[80vh] overflow-hidden">
+            <div className="flex items-center justify-between px-4 py-3 border-b border-white/10">
+              <div>
+                <h4 className="font-semibold text-lg">Preview: {previewModal.suggestion.title}</h4>
+                <p className="text-xs text-gray-300">Showing first 5 rows with proposed columns</p>
+              </div>
+              <button onClick={() => setPreviewModal(null)} className="px-3 py-1.5 rounded bg-white/10 hover:bg-white/20 text-sm">Close</button>
+            </div>
+            <div className="p-4 overflow-auto">
+              <table className="w-full text-xs text-gray-200">
+                <thead className="text-left">
+                  <tr>
+                    {Object.keys(previewModal.rows[0] || {}).slice(0, 12).map((col) => (
+                      <th key={col} className="px-2 py-1 border-b border-white/10">{col}</th>
+                    ))}
+                  </tr>
+                </thead>
+                <tbody>
+                  {previewModal.rows.map((row, idx) => (
+                    <tr key={idx} className="border-b border-white/5">
+                      {Object.keys(previewModal.rows[0] || {}).slice(0, 12).map((col) => (
+                        <td key={col} className="px-2 py-1">{String(row[col] ?? '')}</td>
+                      ))}
+                    </tr>
+                  ))}
+                </tbody>
+              </table>
+            </div>
+          </div>
+        </div>
+      )}
     </div>
   )
 }
